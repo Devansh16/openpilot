@@ -23,19 +23,14 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent) {
 
 #ifdef QCOM2
   set_core_affinity(7);
-  QLabel * label = new QLabel(this);
-  main_layout->addWidget(label);
+#endif
 
-  GLWindow * glWindow = new GLWindow;
-  glWindow->setLabel(label);
-  glWindow->show();
-#else
   GLWindow * glWindow = new GLWindow(this);
   main_layout->addWidget(glWindow);
-#endif
 
   SettingsWindow * settingsWindow = new SettingsWindow(this);
   main_layout->addWidget(settingsWindow);
+
 
   main_layout->setMargin(0);
   setLayout(main_layout);
@@ -63,19 +58,18 @@ GLWindow::GLWindow(QWidget *parent) : QOpenGLWidget(parent) {
   timer = new QTimer(this);
   QObject::connect(timer, SIGNAL(timeout()), this, SLOT(timerUpdate()));
 
-#ifdef QCOM2
-  setFixedWidth(vwp_w);
-  setFixedHeight(vwp_h);
-#endif
+  int result = read_param(&brightness_b, "BRIGHTNESS_B", true);
+  result += read_param(&brightness_m, "BRIGHTNESS_M", true);
+  if(result != 0) {
+    brightness_b = 0.0;
+    brightness_m = 5.0;
+  }
+  smooth_brightness = 512;
 }
 
 GLWindow::~GLWindow() {
   makeCurrent();
   doneCurrent();
-}
-
-void GLWindow::setLabel(QLabel * l){
-  label = l;
 }
 
 void GLWindow::initializeGL() {
@@ -95,6 +89,16 @@ void GLWindow::initializeGL() {
 }
 
 void GLWindow::timerUpdate(){
+  // Update brightness
+  float clipped_brightness = std::min(1023.0f, (ui_state->light_sensor*brightness_m) + brightness_b);
+  smooth_brightness = clipped_brightness * 0.01f + smooth_brightness * 0.99f;
+
+  std::ofstream brightness_control("/sys/class/backlight/panel0-backlight/brightness");
+  if (brightness_control.is_open()){
+    brightness_control << int(smooth_brightness) << "\n";
+    brightness_control.close();
+  }
+
   ui_update(ui_state);
 
 #ifdef QCOM2
@@ -112,13 +116,6 @@ void GLWindow::timerUpdate(){
 #endif
 
   update();
-
-  if (label != NULL){
-    QImage img = grabFramebuffer();
-    QTransform transform;
-    transform.rotate(90);
-    label->setPixmap(QPixmap::fromImage(img).transformed(transform));
-  }
 }
 
 void GLWindow::resizeGL(int w, int h) {

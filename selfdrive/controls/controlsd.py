@@ -3,7 +3,7 @@ import os
 from cereal import car, log
 from common.hardware import HARDWARE
 from common.numpy_fast import clip
-from common.realtime import sec_since_boot, config_rt_process, Priority, Ratekeeper, DT_CTRL
+from common.realtime import sec_since_boot, config_realtime_process, Priority, Ratekeeper, DT_CTRL
 from common.profiler import Profiler
 from common.params import Params, put_nonblocking
 import cereal.messaging as messaging
@@ -42,7 +42,7 @@ EventName = car.CarEvent.EventName
 
 class Controls:
   def __init__(self, sm=None, pm=None, can_sock=None):
-    config_rt_process(3, Priority.CTRL_HIGH)
+    config_realtime_process(3, Priority.CTRL_HIGH)
 
     # Setup sockets
     self.pm = pm
@@ -83,7 +83,7 @@ class Controls:
 
     car_recognized = self.CP.carName != 'mock'
     # If stock camera is disconnected, we loaded car controls and it's not dashcam mode
-    controller_available = self.CP.enableCamera and self.CI.CC is not None and not passive
+    controller_available = self.CP.enableCamera and self.CI.CC is not None and not passive and not self.CP.dashcamOnly
     community_feature_disallowed = self.CP.communityFeature and not community_feature_toggle
     self.read_only = not car_recognized or not controller_available or \
                        self.CP.dashcamOnly or community_feature_disallowed
@@ -121,10 +121,11 @@ class Controls:
     self.last_blinker_frame = 0
     self.saturated_count = 0
     self.distance_traveled = 0
+    self.last_functional_fan_frame = 0
     self.events_prev = []
     self.current_alert_types = [ET.PERMANENT]
 
-    self.sm['liveCalibration'].calStatus = Calibration.INVALID
+    self.sm['liveCalibration'].calStatus = Calibration.CALIBRATED
     self.sm['thermal'].freeSpace = 1.
     self.sm['dMonitoringState'].events = []
     self.sm['dMonitoringState'].awarenessStatus = 1.
@@ -138,7 +139,7 @@ class Controls:
       self.events.add(EventName.internetConnectivityNeeded, static=True)
     if community_feature_disallowed:
       self.events.add(EventName.communityFeatureDisallowed, static=True)
-    if self.read_only and not passive:
+    if not car_recognized:
       self.events.add(EventName.carUnrecognized, static=True)
     if hw_type == HwType.whitePanda:
       self.events.add(EventName.whitePandaUnsupported, static=True)
@@ -170,6 +171,14 @@ class Controls:
       self.events.add(EventName.outOfSpace)
     if self.sm['thermal'].memUsedPercent > 90:
       self.events.add(EventName.lowMemory)
+
+    # Alert if fan isn't spinning for 5 seconds
+    if self.sm['health'].hwType in [HwType.uno, HwType.dos]:
+      if self.sm['health'].fanSpeedRpm == 0 and self.sm['thermal'].fanSpeed > 50:
+        if (self.sm.frame - self.last_functional_fan_frame) * DT_CTRL > 5.0:
+          self.events.add(EventName.fanMalfunction)
+      else:
+        self.last_functional_fan_frame = self.sm.frame
 
     # Handle calibration status
     cal_status = self.sm['liveCalibration'].calStatus
@@ -234,7 +243,7 @@ class Controls:
 
     # Only allow engagement with brake pressed when stopped behind another stopped car
     if CS.brakePressed and self.sm['plan'].vTargetFuture >= STARTING_TARGET_SPEED \
-      and not self.CP.radarOffCan and CS.vEgo < 0.3:
+      and self.CP.openpilotLongitudinalControl and CS.vEgo < 0.3:
       self.events.add(EventName.noTarget)
 
   def data_sample(self):
